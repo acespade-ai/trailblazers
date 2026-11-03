@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trailblazers — a 2–4 player trail-claim strategy game</title>
+<style>
+  :root { font-family: system-ui, sans-serif; color: #222; }
+  body { max-width: 900px; margin: 0 auto; padding: 16px; background: #faf8f4; }
+  h1 { margin: 0 0 4px; } .sub { color: #666; margin: 0 0 16px; }
+  .panel { background: #fff; border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .board { display: grid; grid-template-columns: repeat(6, 56px); gap: 4px; }
+  .cell { width: 56px; height: 56px; border-radius: 8px; background: #eee; display: flex; align-items: center; justify-content: center; font-size: 26px; cursor: default; user-select: none; }
+  .cell.legal { outline: 3px solid #333; cursor: pointer; }
+  .cell.legal:hover { filter: brightness(1.1); }
+  .pawn { border: 3px solid #111; box-sizing: border-box; }
+  button, input, select { font-size: 15px; padding: 7px 10px; border-radius: 7px; border: 1px solid #bbb; }
+  button { background: #222; color: #fff; cursor: pointer; } button:disabled { opacity: .5; }
+  #log { max-height: 220px; overflow: auto; font-size: 13px; background: #f6f6f6; padding: 8px; border-radius: 6px; }
+  #log div { margin: 2px 0; }
+  .winner { font-size: 20px; font-weight: 700; }
+  .muted { color: #777; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>🗺️ Trailblazers</h1>
+<p class="sub">2–4 players. On your turn, move your pawn one square in any direction onto an empty cell — the cell you leave stays yours. Can't move? You're out. Last player standing wins; if the board fills, most cells wins. Every move is a choice between grabbing ground and cutting someone off.</p>
+
+<div class="panel" id="lobby">
+  <div class="row">
+    <label>Players <select id="numPlayers"><option>2</option><option>3</option><option selected>4</option></select></label>
+    <label>Bots at start <select id="numBots"><option>0</option><option>1</option><option selected>2</option><option>3</option></select></label>
+    <button id="createBtn">Create match</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input id="joinCode" placeholder="Match code (e.g. TB7X)" maxlength="4" style="text-transform:uppercase">
+    <input id="joinName" placeholder="Your name">
+    <button id="joinBtn">Join match</button>
+    <button id="watchBtn">Watch</button>
+  </div>
+  <p class="muted">Humans need no account: create or join with a code, and empty seats can be filled by bots. Agents: see the API docs in the repo README — same endpoints this page uses.</p>
+</div>
+
+<div class="panel" id="gamePanel" style="display:none">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <div><b>Match <span id="codeOut"></span></b> · <span id="statusOut"></span></div>
+    <div>
+      <button id="startBtn">Start (fill empty seats with bots)</button>
+      <button id="addBotBtn">Add bot</button>
+    </div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <div class="board" id="board"></div>
+      <p class="muted" id="turnOut"></p>
+      <div class="row">
+        <button id="replayPrev">◀ Replay step</button>
+        <button id="replayNext">Replay step ▶</button>
+        <button id="replayLive">Back to live</button>
+        <span id="replayOut" class="muted"></span>
+      </div>
+    </div>
+    <div style="flex:1;min-width:240px">
+      <div id="playersOut"></div>
+      <h3 style="margin:12px 0 4px">Match log</h3>
+      <div id="log"></div>
+    </div>
+  </div>
+  <p id="winnerOut" class="winner"></p>
+</div>
+
+<script>
+let S = null; // server state
+let me = JSON.parse(localStorage.getItem('tb-me') || 'null'); // {code, seat, token}
+let replayIdx = null; // null = live
+
+async function api(path, body) {
+  const r = await fetch(path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+function cellColor(owner, players) {
+  return owner === null ? '#eee' : players[owner].color;
+}
+
+function renderBoard(state) {
+  const b = document.getElementById('board');
+  b.innerHTML = '';
+  const legal = new Set();
+  if (state.status === 'playing' && me && state.turn === me.seat && replayIdx === null) {
+    const [pr, pc] = state.pawns[me.seat];
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const r = pr + dr, c = pc + dc;
+      if (r >= 0 && r < 6 && c >= 0 && c < 6 && state.board[r][c] === null) legal.add(r + ',' + c);
+    }
+  }
+  for (let r = 0; r < 6; r++) for (let c = 0; c < 6; c++) {
+    const d = document.createElement('div');
+    d.className = 'cell' + (legal.has(r + ',' + c) ? ' legal' : '');
+    d.style.background = cellColor(state.board[r][c], state.players);
+    const pawnSeat = Object.entries(state.pawns).find(([, p]) => p && p[0] === r && p[1] === c);
+    if (pawnSeat) { d.classList.add('pawn'); d.textContent = '●'; }
+    if (legal.has(r + ',' + c)) d.onclick = () => doMove([r, c]);
+    b.appendChild(d);
+  }
+}
+
+// Rebuild board from the log up to index i (for replay).
+function replayState(upto) {
+  const start = S.log.find(e => e.type === 'start');
+  const players = S.players;
+  const board = Array.from({ length: 6 }, () => Array(6).fill(null));
+  const pawns = {};
+  if (start) {
+    for (const [seat, p] of Object.entries(start.pawns)) {
+      pawns[seat] = p;
+      if (p) board[p[0]][p[1]] = Number(seat);
+    }
+  }
+  let n = 0;
+  for (const e of S.log) {
+    if (n++ > upto) break;
+    if (e.type === 'move') { board[e.to[0]][e.to[1]] = e.seat; pawns[e.seat] = e.to; }
+  }
+  return { board, pawns, players, status: 'replay', turn: null };
+}
+
+function render() {
+  if (!S) return;
+  document.getElementById('gamePanel').style.display = '';
+  document.getElementById('codeOut').textContent = S.code;
+  document.getElementById('statusOut').textContent = S.status + (S.status === 'playing' ? ' · turn: ' + (S.players[S.turn]?.name ?? ('Seat ' + S.turn)) : '');
+  document.getElementById('startBtn').style.display = S.status === 'lobby' ? '' : 'none';
+  document.getElementById('addBotBtn').style.display = S.status === 'lobby' ? '' : 'none';
+  const shown = replayIdx === null ? S : replayState(replayIdx);
+  document.getElementById('replayOut').textContent = replayIdx === null ? '' : ('replay: move ' + replayIdx + ' of ' + S.log.filter(e => e.type === 'move').length);
+  renderBoard({ ...shown, players: S.players, status: replayIdx === null ? S.status : 'replay', turn: replayIdx === null ? S.turn : null, pawns: shown.pawns });
+  document.getElementById('playersOut').innerHTML = S.players.map(p =>
+    `<div><span style="color:${p.color}">■</span> <b>${p.name ?? '— open seat —'}</b> ${p.isBot ? '(bot)' : ''} ${p.alive ? '' : '(out)'} · ${S.counts[p.seat]} cells ${me && me.seat === p.seat ? ' ← you' : ''}</div>`).join('');
+  document.getElementById('log').innerHTML = S.log.map(e => {
+    if (e.type === 'move') return `<div>${S.players[e.seat]?.name ?? e.seat} moved ${String.fromCharCode(65 + e.from[1])}${e.from[0] + 1} → ${String.fromCharCode(65 + e.to[1])}${e.to[0] + 1}</div>`;
+    if (e.type === 'eliminate') return `<div>${S.players[e.seat]?.name ?? e.seat} ran out of moves and is out</div>`;
+    if (e.type === 'end') return `<div><b>Game over — winner: ${S.players[e.winner]?.name ?? e.winner} (${e.reason})</b></div>`;
+    if (e.type === 'start') return `<div>Game started</div>`;
+    return `<div>${JSON.stringify(e)}</div>`;
+  }).join('');
+  document.getElementById('turnOut').textContent =
+    S.status === 'finished' ? '' :
+    S.status === 'lobby' ? 'Waiting in lobby — join, add bots, then start.' :
+    (me && S.turn === me.seat ? 'Your turn — click a highlighted cell.' : 'Waiting for ' + (S.players[S.turn]?.name ?? 'Seat ' + S.turn) + '.');
+  document.getElementById('winnerOut').textContent = S.status === 'finished' ? ('🏆 Winner: ' + (S.players[S.winner]?.name ?? S.winner)) : '';
+}
+
+async function refresh() {
+  if (!me) return;
+  try { S = await api('/api/matches/' + me.code); if (replayIdx !== null && replayIdx > S.log.length) replayIdx = null; render(); }
+  catch (e) { /* keep last state on transient errors */ }
+}
+
+async function doMove(to) {
+  if (!me) return;
+  try { S = await api('/api/matches/' + me.code + '/move', { token: me.token, to }); render(); }
+  catch (e) { alert('Move failed: ' + e.message); }
+}
+
+document.getElementById('createBtn').onclick = async () => {
+  const numPlayers = Number(document.getElementById('numPlayers').value);
+  const bots = Number(document.getElementById('numBots').value);
+  const j = await api('/api/matches', { players: numPlayers, bots });
+  S = j; me = null;
+  document.getElementById('joinCode').value = j.code;
+  document.getElementById('gamePanel').style.display = '';
+  render();
+  alert('Match created: ' + j.code + '. Now join it with your name (or share the code).');
+};
+document.getElementById('joinBtn').onclick = async () => {
+  const code = document.getElementById('joinCode').value.trim().toUpperCase();
+  const name = document.getElementById('joinName').value.trim() || 'Player';
+  const j = await api('/api/matches/' + code + '/join', { name });
+  me = { code, seat: j.seat, token: j.token };
+  localStorage.setItem('tb-me', JSON.stringify(me));
+  S = j; render();
+};
+document.getElementById('watchBtn').onclick = async () => {
+  const code = document.getElementById('joinCode').value.trim().toUpperCase();
+  me = null; S = await api('/api/matches/' + code); render();
+};
+document.getElementById('startBtn').onclick = async () => {
+  S = await api('/api/matches/' + me.code + '/start', {}); render();
+};
+document.getElementById('addBotBtn').onclick = async () => {
+  S = await api('/api/matches/' + me.code + '/add-bot', {}); render();
+};
+document.getElementById('replayPrev').onclick = () => {
+  if (replayIdx === null) replayIdx = S.log.length;
+  replayIdx = Math.max(0, replayIdx - 1); render();
+};
+document.getElementById('replayNext').onclick = () => {
+  if (replayIdx === null) return;
+  replayIdx = Math.min(S.log.length, replayIdx + 1); render();
+};
+document.getElementById('replayLive').onclick = () => { replayIdx = null; render(); };
+
+setInterval(refresh, 1500);
+if (me) refresh();
+</script>
+</body>
+</html>
