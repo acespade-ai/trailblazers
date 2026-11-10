@@ -77,7 +77,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { code, ...publicState(game) });
   }
 
-  const m = p.match(/^\/api\/matches\/([A-Z0-9]{4})(?:\/(join|move|add-bot|start|log))?$/);
+  const m = p.match(/^\/api\/matches\/([A-Z0-9]{4})(?:\/(join|move|add-bot|start|log|leave))?$/);
   if (!m) return send(res, 404, { error: 'not found' });
   const match = matches.get(m[1]);
   if (!match) return send(res, 404, { error: 'unknown match code' });
@@ -119,6 +119,25 @@ const server = http.createServer(async (req, res) => {
     game.turn = 0;
     game.log.push({ type: 'start', players: game.players.map((pl) => ({ seat: pl.seat, name: pl.name, isBot: pl.isBot })), pawns: game.pawns });
     runBots(match);
+    return send(res, 200, publicState(game));
+  }
+
+  if (req.method === 'POST' && m[2] === 'leave') {
+    // Escape hatch: always succeeds, even with a missing/stale token, so a
+    // client can never get wedged on an old match. Lobby: the seat is freed
+    // for someone else. Playing: the seat becomes a bot so the remaining
+    // players are never stuck waiting on a human who left. Finished: no-op.
+    const seat = seatOf(match, b.token);
+    if (seat === undefined) return send(res, 200, publicState(game));
+    match.tokens.delete(b.token);
+    const pl = game.players[seat];
+    if (game.status === 'lobby') {
+      pl.name = null;
+      pl.isBot = false;
+    } else if (game.status === 'playing') {
+      pl.isBot = true;
+      if (game.turn === seat) runBots(match);
+    }
     return send(res, 200, publicState(game));
   }
 

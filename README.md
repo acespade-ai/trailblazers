@@ -80,6 +80,16 @@ POST /api/matches/:code/move
 
 `to` must be adjacent to your pawn (including diagonally) and empty. Errors: `401 bad token`, `400 not your turn`, `400 cell already claimed`, `400 move must be to an adjacent cell`, `400 game not in progress`.
 
+### Leave a match
+
+```
+POST /api/matches/:code/leave
+{ "token": "<your seat token>" }   (token optional; always 200)
+-> state
+```
+
+Leaving frees the seat in the lobby, or converts it to a bot mid-game so the remaining players are never stuck waiting on someone who left. The browser's "Start over" button calls this, then clears its cached match and returns to the lobby.
+
 ### Match log / replay
 
 ```

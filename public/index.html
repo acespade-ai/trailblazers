@@ -15,6 +15,9 @@
   .cell.legal { outline: 3px solid #333; cursor: pointer; }
   .cell.legal:hover { filter: brightness(1.1); }
   .pawn { border: 3px solid #111; box-sizing: border-box; }
+  .cell.own-pawn { box-shadow: inset 0 0 0 3px #fff, inset 0 0 0 6px #111; }
+  button.secondary { background: #fff; color: #222; }
+  #youBanner { font-size: 16px; font-weight: 600; background: #f6f6f6; border-radius: 6px; padding: 8px 10px; }
   button, input, select { font-size: 15px; padding: 7px 10px; border-radius: 7px; border: 1px solid #bbb; }
   button { background: #222; color: #fff; cursor: pointer; } button:disabled { opacity: .5; }
   #log { max-height: 220px; overflow: auto; font-size: 13px; background: #f6f6f6; padding: 8px; border-radius: 6px; }
@@ -48,8 +51,10 @@
     <div>
       <button id="startBtn">Start (fill empty seats with bots)</button>
       <button id="addBotBtn">Add bot</button>
+      <button id="leaveBtn" class="secondary" title="Leave this match and return to the lobby">↺ Start over</button>
     </div>
   </div>
+  <div id="youBanner" style="display:none;margin-top:10px"></div>
   <div class="row" style="margin-top:12px">
     <div>
       <div class="board" id="board"></div>
@@ -86,6 +91,29 @@ function cellColor(owner, players) {
   return owner === null ? '#eee' : players[owner].color;
 }
 
+// Seat colors are the identity when names collide: "Tester (red)" vs "Tester (blue)".
+const COLOR_NAMES = { '#e74c3c': 'red', '#3498db': 'blue', '#2ecc71': 'green', '#f1c40f': 'yellow' };
+function colorName(p) { return COLOR_NAMES[p.color] || p.color; }
+function displayName(p) { return p == null ? '?' : (p.name == null ? 'Seat ' + p.seat : p.name + ' (' + colorName(p) + ')'); }
+
+// Plain-words win reason for the end screen + match log (Kenny's Nov 10
+// playtest: a tie showed the winner with no explanation of why).
+// - 'last-standing': winner is the only player still able to move.
+// - 'board-full': most cells wins; a tie on the top count goes to the
+//   lowest seat (game.js: first seat with the max count wins).
+function winReasonText(S, e) {
+  if (e.winner == null) return 'no winner';
+  if (e.reason === 'last-standing') return 'last player able to move';
+  if (e.reason === 'board-full') {
+    const counts = e.counts || S.counts;
+    const top = Math.max.apply(null, counts);
+    const tied = counts.map((n, s) => (n === top ? s : -1)).filter((s) => s >= 0);
+    if (tied.length > 1) return 'board full — tied ' + top + '–' + top + ' cells, lowest seat takes it';
+    return 'board full — most cells (' + top + ')';
+  }
+  return e.reason;
+}
+
 function renderBoard(state) {
   const b = document.getElementById('board');
   b.innerHTML = '';
@@ -103,7 +131,7 @@ function renderBoard(state) {
     d.className = 'cell' + (legal.has(r + ',' + c) ? ' legal' : '');
     d.style.background = cellColor(state.board[r][c], state.players);
     const pawnSeat = Object.entries(state.pawns).find(([, p]) => p && p[0] === r && p[1] === c);
-    if (pawnSeat) { d.classList.add('pawn'); d.textContent = '●'; }
+    if (pawnSeat) { d.classList.add('pawn'); if (me && Number(pawnSeat[0]) === me.seat) d.classList.add('own-pawn'); d.textContent = '●'; }
     if (legal.has(r + ',' + c)) d.onclick = () => doMove([r, c]);
     b.appendChild(d);
   }
@@ -133,32 +161,61 @@ function render() {
   if (!S) return;
   document.getElementById('gamePanel').style.display = '';
   document.getElementById('codeOut').textContent = S.code;
-  document.getElementById('statusOut').textContent = S.status + (S.status === 'playing' ? ' · turn: ' + (S.players[S.turn]?.name ?? ('Seat ' + S.turn)) : '');
+  document.getElementById('statusOut').textContent = S.status + (S.status === 'playing' ? ' · turn: ' + displayName(S.players[S.turn]) : '');
+  const banner = document.getElementById('youBanner');
+  if (me && S.players[me.seat] && S.players[me.seat].name != null) {
+    const p = S.players[me.seat];
+    banner.innerHTML = 'You are: <span style="color:' + p.color + '">■</span> ' + displayName(p);
+    banner.style.display = '';
+  } else {
+    banner.style.display = 'none';
+  }
   document.getElementById('startBtn').style.display = S.status === 'lobby' ? '' : 'none';
   document.getElementById('addBotBtn').style.display = S.status === 'lobby' ? '' : 'none';
   const shown = replayIdx === null ? S : replayState(replayIdx);
   document.getElementById('replayOut').textContent = replayIdx === null ? '' : ('replay: move ' + replayIdx + ' of ' + S.log.filter(e => e.type === 'move').length);
   renderBoard({ ...shown, players: S.players, status: replayIdx === null ? S.status : 'replay', turn: replayIdx === null ? S.turn : null, pawns: shown.pawns });
   document.getElementById('playersOut').innerHTML = S.players.map(p =>
-    `<div><span style="color:${p.color}">■</span> <b>${p.name ?? '— open seat —'}</b> ${p.isBot ? '(bot)' : ''} ${p.alive ? '' : '(out)'} · ${S.counts[p.seat]} cells ${me && me.seat === p.seat ? ' ← you' : ''}</div>`).join('');
+    `<div><span style="color:${p.color}">■</span> <b>${p.name == null ? '— open seat —' : displayName(p)}</b> ${p.isBot ? '(bot)' : ''} ${p.alive ? '' : '(out)'} · ${S.counts[p.seat]} cells ${me && me.seat === p.seat ? ' ← you' : ''}</div>`).join('');
   document.getElementById('log').innerHTML = S.log.map(e => {
-    if (e.type === 'move') return `<div>${S.players[e.seat]?.name ?? e.seat} moved ${String.fromCharCode(65 + e.from[1])}${e.from[0] + 1} → ${String.fromCharCode(65 + e.to[1])}${e.to[0] + 1}</div>`;
-    if (e.type === 'eliminate') return `<div>${S.players[e.seat]?.name ?? e.seat} ran out of moves and is out</div>`;
-    if (e.type === 'end') return `<div><b>Game over — winner: ${S.players[e.winner]?.name ?? e.winner} (${e.reason})</b></div>`;
+    if (e.type === 'move') return `<div>${displayName(S.players[e.seat])} moved ${String.fromCharCode(65 + e.from[1])}${e.from[0] + 1} → ${String.fromCharCode(65 + e.to[1])}${e.to[0] + 1}</div>`;
+    if (e.type === 'eliminate') return `<div>${displayName(S.players[e.seat])} ran out of moves and is out</div>`;
+    if (e.type === 'end') return `<div><b>Game over — winner: ${e.winner == null ? '—' : displayName(S.players[e.winner])} · ${winReasonText(S, e)}</b></div>`;
     if (e.type === 'start') return `<div>Game started</div>`;
     return `<div>${JSON.stringify(e)}</div>`;
   }).join('');
   document.getElementById('turnOut').textContent =
     S.status === 'finished' ? '' :
     S.status === 'lobby' ? 'Waiting in lobby — join, add bots, then start.' :
-    (me && S.turn === me.seat ? 'Your turn — click a highlighted cell.' : 'Waiting for ' + (S.players[S.turn]?.name ?? 'Seat ' + S.turn) + '.');
-  document.getElementById('winnerOut').textContent = S.status === 'finished' ? ('🏆 Winner: ' + (S.players[S.winner]?.name ?? S.winner)) : '';
+    (me && S.turn === me.seat ? 'Your turn — click a highlighted cell.' : 'Waiting for ' + displayName(S.players[S.turn]) + '.');
+  const endEntry = S.status === 'finished' ? S.log.find((e) => e.type === 'end') : null;
+  document.getElementById('winnerOut').textContent = S.status === 'finished' ? ('🏆 Winner: ' + (S.winner == null ? '—' : displayName(S.players[S.winner])) + (endEntry ? ' — ' + winReasonText(S, endEntry) : '')) : '';
 }
 
 async function refresh() {
   if (!me) return;
   try { S = await api('/api/matches/' + me.code); if (replayIdx !== null && replayIdx > S.log.length) replayIdx = null; render(); }
-  catch (e) { /* keep last state on transient errors */ }
+  catch (e) {
+    // Cached match is gone server-side (e.g. server restarted): drop the
+    // stale local state instead of polling a dead code forever.
+    if (/unknown match code|HTTP 404/.test(e.message)) {
+      localStorage.removeItem('tb-me'); me = null; S = null; replayIdx = null;
+      document.getElementById('gamePanel').style.display = 'none';
+    }
+  }
+}
+
+// Leave the current match (server frees the seat / converts it to a bot) and
+// return to the lobby. Never wedges: the client escapes even if the request fails.
+async function leaveMatch() {
+  if (me) {
+    try { await api('/api/matches/' + me.code + '/leave', { token: me.token }); }
+    catch (e) { /* escape regardless */ }
+  }
+  localStorage.removeItem('tb-me');
+  me = null; S = null; replayIdx = null;
+  document.getElementById('gamePanel').style.display = 'none';
+  window.scrollTo(0, 0);
 }
 
 async function doMove(to) {
@@ -189,6 +246,7 @@ document.getElementById('watchBtn').onclick = async () => {
   const code = document.getElementById('joinCode').value.trim().toUpperCase();
   me = null; S = await api('/api/matches/' + code); render();
 };
+document.getElementById('leaveBtn').onclick = leaveMatch;
 document.getElementById('startBtn').onclick = async () => {
   S = await api('/api/matches/' + me.code + '/start', {}); render();
 };
